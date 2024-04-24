@@ -48,12 +48,18 @@
 #    include "sleep_led.h"
 #endif
 #include "suspend.h"
-#include "wait.h"
 
 #include "usb_descriptor.h"
 #include "lufa.h"
+#include "quantum.h"
 #include "usb_device_state.h"
 #include <util/atomic.h>
+
+#ifdef NKRO_ENABLE
+#    include "keycode_config.h"
+
+extern keymap_config_t keymap_config;
+#endif
 
 #ifdef VIRTSER_ENABLE
 #    include "virtser.h"
@@ -77,10 +83,9 @@ static report_keyboard_t keyboard_report_sent;
 /* Host driver */
 static uint8_t keyboard_leds(void);
 static void    send_keyboard(report_keyboard_t *report);
-static void    send_nkro(report_nkro_t *report);
 static void    send_mouse(report_mouse_t *report);
 static void    send_extra(report_extra_t *report);
-host_driver_t  lufa_driver = {keyboard_leds, send_keyboard, send_nkro, send_mouse, send_extra};
+host_driver_t  lufa_driver = {keyboard_leds, send_keyboard, send_mouse, send_extra};
 
 void send_report(uint8_t endpoint, void *report, size_t size) {
     uint8_t timeout = 255;
@@ -184,15 +189,40 @@ static void raw_hid_task(void) {
  * Console
  ******************************************************************************/
 #ifdef CONSOLE_ENABLE
-/** \brief Console Tasks
+/** \brief Console Task
  *
  * FIXME: Needs doc
  */
-static void console_flush_task(void) {
+static void Console_Task(void) {
     /* Device must be connected and configured for the task to run */
     if (USB_DeviceState != DEVICE_STATE_Configured) return;
 
     uint8_t ep = Endpoint_GetCurrentEndpoint();
+
+#    if 0
+    // TODO: impl receivechar()/recvchar()
+    Endpoint_SelectEndpoint(CONSOLE_OUT_EPNUM);
+
+    /* Check to see if a packet has been sent from the host */
+    if (Endpoint_IsOUTReceived())
+    {
+        /* Check to see if the packet contains data */
+        if (Endpoint_IsReadWriteAllowed())
+        {
+            /* Create a temporary buffer to hold the read in report from the host */
+            uint8_t ConsoleData[CONSOLE_EPSIZE];
+
+            /* Read Console Report Data */
+            Endpoint_Read_Stream_LE(&ConsoleData, sizeof(ConsoleData), NULL);
+
+            /* Process Console Report Data */
+            //ProcessConsoleHIDReport(ConsoleData);
+        }
+
+        /* Finalize the stream transfer to send the last packet */
+        Endpoint_ClearOUT();
+    }
+#    endif
 
     /* IN packet */
     Endpoint_SelectEndpoint(CONSOLE_IN_EPNUM);
@@ -211,10 +241,6 @@ static void console_flush_task(void) {
     }
 
     Endpoint_SelectEndpoint(ep);
-}
-
-void console_task(void) {
-    // do nothing
 }
 #endif
 
@@ -320,7 +346,7 @@ void EVENT_USB_Device_StartOfFrame(void) {
     count = 0;
 
     if (!console_flush) return;
-    console_flush_task();
+    Console_Task();
     console_flush = false;
 }
 
@@ -360,6 +386,9 @@ void EVENT_USB_Device_ConfigurationChanged(void) {
 #ifdef CONSOLE_ENABLE
     /* Setup console endpoint */
     ConfigSuccess &= Endpoint_ConfigureEndpoint((CONSOLE_IN_EPNUM | ENDPOINT_DIR_IN), EP_TYPE_INTERRUPT, CONSOLE_EPSIZE, 1);
+#    if 0
+    ConfigSuccess &= Endpoint_ConfigureEndpoint((CONSOLE_OUT_EPNUM | ENDPOINT_DIR_OUT), EP_TYPE_INTERRUPT, CONSOLE_EPSIZE, 1);
+#    endif
 #endif
 
 #ifdef MIDI_ENABLE
@@ -530,24 +559,25 @@ static uint8_t keyboard_leds(void) {
  * FIXME: Needs doc
  */
 static void send_keyboard(report_keyboard_t *report) {
+    /* Select the Keyboard Report Endpoint */
+    uint8_t ep   = KEYBOARD_IN_EPNUM;
+    uint8_t size = KEYBOARD_REPORT_SIZE;
+
     /* If we're in Boot Protocol, don't send any report ID or other funky fields */
     if (!keyboard_protocol) {
-        send_report(KEYBOARD_IN_EPNUM, &report->mods, 8);
+        send_report(ep, &report->mods, 8);
     } else {
-        send_report(KEYBOARD_IN_EPNUM, report, KEYBOARD_REPORT_SIZE);
+#ifdef NKRO_ENABLE
+        if (keymap_config.nkro) {
+            ep   = SHARED_IN_EPNUM;
+            size = sizeof(struct nkro_report);
+        }
+#endif
+
+        send_report(ep, report, size);
     }
 
     keyboard_report_sent = *report;
-}
-
-/** \brief Send NKRO
- *
- * FIXME: Needs doc
- */
-static void send_nkro(report_nkro_t *report) {
-#ifdef NKRO_ENABLE
-    send_report(SHARED_IN_EPNUM, report, sizeof(report_nkro_t));
-#endif
 }
 
 /** \brief Send Mouse
@@ -603,7 +633,7 @@ int8_t sendchar(uint8_t c) {
     // The `timed_out` state is an approximation of the ideal `is_listener_disconnected?` state.
     static bool timed_out = false;
 
-    // prevents console_flush_task() from running during sendchar() runs.
+    // prevents Console_Task() from running during sendchar() runs.
     // or char will be lost. These two function is mutually exclusive.
     CONSOLE_FLUSH_SET(false);
 
@@ -788,7 +818,7 @@ static void setup_usb(void) {
 
     USB_Init();
 
-    // for console_flush_task
+    // for Console_Task
     USB_Device_EnableSOFEvents();
 }
 
@@ -828,7 +858,7 @@ void protocol_post_init(void) {
 void protocol_pre_task(void) {
 #if !defined(NO_USB_STARTUP_CHECK)
     if (USB_DeviceState == DEVICE_STATE_Suspended) {
-        dprintln("suspending keyboard");
+        print("[s]");
         while (USB_DeviceState == DEVICE_STATE_Suspended) {
             suspend_power_down();
             if (USB_Device_RemoteWakeupEnabled && suspend_wakeup_condition()) {
@@ -852,10 +882,6 @@ void protocol_pre_task(void) {
 }
 
 void protocol_post_task(void) {
-#ifdef CONSOLE_ENABLE
-    console_task();
-#endif
-
 #ifdef MIDI_ENABLE
     MIDI_Device_USBTask(&USB_MIDI_Interface);
 #endif

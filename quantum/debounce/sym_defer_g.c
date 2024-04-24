@@ -17,17 +17,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 Basic global debounce algorithm. Used in 99% of keyboards at time of implementation
 When no state changes have occured for DEBOUNCE milliseconds, we push the state.
 */
-#include "debounce.h"
+#include "matrix.h"
 #include "timer.h"
+#include "quantum.h"
 #include <string.h>
 #ifndef DEBOUNCE
 #    define DEBOUNCE 5
-#endif
-
-// Maximum debounce: 255ms
-#if DEBOUNCE > UINT8_MAX
-#    undef DEBOUNCE
-#    define DEBOUNCE UINT8_MAX
 #endif
 
 #if DEBOUNCE > 0
@@ -42,10 +37,11 @@ bool debounce(matrix_row_t raw[], matrix_row_t cooked[], uint8_t num_rows, bool 
     if (changed) {
         debouncing      = true;
         debouncing_time = timer_read_fast();
-    } else if (debouncing && timer_elapsed_fast(debouncing_time) >= DEBOUNCE) {
-        size_t matrix_size = num_rows * sizeof(matrix_row_t);
-        if (memcmp(cooked, raw, matrix_size) != 0) {
-            memcpy(cooked, raw, matrix_size);
+    }
+
+    if (debouncing && timer_elapsed_fast(debouncing_time) >= DEBOUNCE) {
+        if (memcmp(cooked, raw, sizeof(matrix_row_t) * num_rows) != 0) {
+            memcpy(cooked, raw, sizeof(matrix_row_t) * num_rows);
             cooked_changed = true;
         }
         debouncing = false;
